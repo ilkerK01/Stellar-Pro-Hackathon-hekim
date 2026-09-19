@@ -296,27 +296,40 @@ Patients are already global: anyone signs in with email and pays in digital doll
 
 ## Run it locally
 
-Requirements: Node 22+, a Trustless Work testnet API key, a Privy app with email login. For the contract: Rust with the `wasm32v1-none` target and the Stellar CLI.
+Requirements: **Node 22.13+** (the app uses the built-in `node:sqlite`), a [Trustless Work](https://dapp.trustlesswork.com) testnet API key and a [Privy](https://dashboard.privy.io) app with email login. For the contract: Rust with the `wasm32v1-none` target and the [Stellar CLI](https://developers.stellar.org/docs/tools/cli).
 
 ```bash
 npm install
 cp .env.example .env.local
-node scripts/setup.mjs
+npm run setup
 
 cd contracts
 cargo test
 stellar contract build
-stellar contract deploy --wasm target/wasm32v1-none/release/hekim_registry.wasm \
-  --source-account <PLATFORM_SECRET> --network testnet -- --admin <PLATFORM_ADDRESS>
+stellar contract deploy --wasm target/wasm32v1-none/release/hekim_registry.wasm   --source-account <PLATFORM_SECRET> --network testnet -- --admin <PLATFORM_ADDRESS>
 cd ..
 
-node scripts/setup.mjs
+npm run setup
 npm run dev
 ```
 
-1. The first `setup.mjs` run creates the platform, clinic and arbiter keys in `.env.local`, funds them with Friendbot and opens USDC trustlines.
-2. Add `TW_API_KEY`, `NEXT_PUBLIC_PRIVY_APP_ID` and the deployed `REGISTRY_CONTRACT_ID` to `.env.local`.
-3. The second run registers the demo clinic in the registry.
+1. The first `npm run setup` creates the platform, clinic and arbiter keys in `.env.local`, funds them with Friendbot, opens USDC trustlines and prints the exact deploy command with your platform address.
+2. Put the deployed contract id in `REGISTRY_CONTRACT_ID`, and add `TW_API_KEY` and `NEXT_PUBLIC_PRIVY_APP_ID` to `.env.local`.
+3. The second `npm run setup` registers the demo clinic in the registry.
+4. Open http://localhost:3000.
+
+Without `NEXT_PUBLIC_PRIVY_APP_ID` the landing, clinic and arbiter pages work and the patient page explains what is missing. Without `TW_API_KEY` everything works up to accepting a plan.
+
+### Check that it works
+
+```bash
+npm run typecheck
+npm run lint
+cd contracts && cargo test && cd ..
+npm run e2e
+```
+
+`npm run e2e` drives the whole product against Stellar testnet through the app's own API, with a local key playing the patient instead of Privy: wallet activation and USDC trustline, SEP-10 login, a 400 TRY SEP-6 top-up, a plan with escrow deployment and funding, stage reports with evidence hashes, approvals and releases, a patient dispute and an arbiter split, case closing and the registry record. Other scenarios: `npm run e2e -- noshow`, `npm run e2e -- noresponse` (waits for the 2-minute window), `npm run e2e -- payout` (clinic cash-out to TRY). It needs the dev server running.
 
 | Page | What you can do |
 |---|---|
@@ -343,6 +356,7 @@ Every screen is available in English and Turkish.
 ```
 contracts/registry/        Soroban registry contract and tests
 scripts/setup.mjs          Creates and funds demo accounts, registers the clinic
+scripts/e2e.mjs            End-to-end run of every flow on testnet
 src/lib/server/
   hekim.ts                 Cases, stages, approval window, claims, arbiter, registry hooks
   trustless.ts             Trustless Work REST client
