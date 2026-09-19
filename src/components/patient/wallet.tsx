@@ -5,7 +5,8 @@ import { useCreateWallet, useSignRawHash } from "@privy-io/react-auth/extended-c
 import { Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/client/api";
-import type { Ramp, Signable } from "@/lib/types";
+import { sep53Digest } from "@/lib/attest";
+import type { Ramp, Signable, SignRequest } from "@/lib/types";
 
 export type WalletInfo = { exists: boolean; xlm: string; usdc: string | null };
 
@@ -21,6 +22,7 @@ type PatientCtx = {
   logout: () => Promise<void>;
   createWallet: () => Promise<void>;
   sign: (s: Signable) => Promise<string>;
+  signStatement: (r: SignRequest) => Promise<string>;
   refresh: () => Promise<void>;
 };
 
@@ -91,6 +93,17 @@ function Inner({ children }: { children: React.ReactNode }) {
     [address, signRawHash],
   );
 
+  const signStatement = useCallback(
+    async (r: SignRequest) => {
+      if (!address) throw new Error("No wallet");
+      const expected = await sep53Digest(r.message);
+      if (expected !== r.digest) throw new Error("The statement does not match what you were shown");
+      const { signature } = await signRawHash({ address, chainType: "stellar", hash: `0x${r.digest}` });
+      return signature;
+    },
+    [address, signRawHash],
+  );
+
   const value = useMemo<PatientCtx>(
     () => ({
       ready,
@@ -104,9 +117,10 @@ function Inner({ children }: { children: React.ReactNode }) {
       logout,
       createWallet,
       sign,
+      signStatement,
       refresh,
     }),
-    [ready, authenticated, email, address, wallet, anchorSession, ramps, login, logout, createWallet, sign, refresh],
+    [ready, authenticated, email, address, wallet, anchorSession, ramps, login, logout, createWallet, sign, signStatement, refresh],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

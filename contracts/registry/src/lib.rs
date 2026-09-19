@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
-    String,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
+    Env, String,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -18,6 +18,8 @@ pub enum Error {
     CaseAlreadyRecorded = 3,
     InvalidAmounts = 4,
     EvidenceAlreadyAnchored = 5,
+    AttestationAlreadyRecorded = 6,
+    InvalidAttestation = 7,
 }
 
 #[contracttype]
@@ -65,12 +67,22 @@ pub struct Evidence {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attestation {
+    pub signer: BytesN<32>,
+    pub digest: BytesN<32>,
+    pub signature: BytesN<64>,
+    pub recorded_at: u64,
+}
+
+#[contracttype]
 #[derive(Clone)]
 enum DataKey {
     Admin,
     Clinic(Address),
     Case(String),
     Evidence(String, u32),
+    Attestation(String, u32, u32, u32),
 }
 
 #[contractevent]
@@ -100,6 +112,18 @@ pub struct CaseRecorded {
     pub outcome: Outcome,
     pub amount: i128,
     pub refunded: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationRecorded {
+    #[topic]
+    pub case_id: String,
+    pub stage: u32,
+    pub phase: u32,
+    pub role: u32,
+    pub signer: BytesN<32>,
+    pub digest: BytesN<32>,
 }
 
 #[contract]
@@ -263,6 +287,59 @@ impl HekimRegistry {
         }
         .publish(&env);
         Ok(outcome)
+    }
+
+    pub fn attest(
+        env: Env,
+        case_id: String,
+        stage: u32,
+        phase: u32,
+        role: u32,
+        signer: BytesN<32>,
+        digest: BytesN<32>,
+        signature: BytesN<64>,
+    ) -> Result<(), Error> {
+        admin(&env).require_auth();
+        if phase > 1 || role > 1 {
+            return Err(Error::InvalidAttestation);
+        }
+        let key = DataKey::Attestation(case_id.clone(), stage, phase, role);
+        if env.storage().persistent().has(&key) {
+            return Err(Error::AttestationAlreadyRecorded);
+        }
+        let message = Bytes::from_array(&env, &digest.to_array());
+        env.crypto().ed25519_verify(&signer, &message, &signature);
+        let record = Attestation {
+            signer: signer.clone(),
+            digest: digest.clone(),
+            signature,
+            recorded_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &record);
+        bump(&env, &key);
+        bump_instance(&env);
+        AttestationRecorded {
+            case_id,
+            stage,
+            phase,
+            role,
+            signer,
+            digest,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn attestation(
+        env: Env,
+        case_id: String,
+        stage: u32,
+        phase: u32,
+        role: u32,
+    ) -> Option<Attestation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Attestation(case_id, stage, phase, role))
     }
 
     pub fn clinic(env: Env, clinic: Address) -> Option<Clinic> {

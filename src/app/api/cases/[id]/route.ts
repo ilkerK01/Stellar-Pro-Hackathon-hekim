@@ -1,16 +1,20 @@
 import {
   acceptCase,
+  clinicCheckin,
   clinicClaim,
+  clinicSign,
   completeStage,
   getCase,
   prepareApprove,
   prepareDispute,
   prepareFund,
+  preparePatientSign,
   releaseStage,
   resolveDispute,
   retryRegistry,
   rules,
   submitPatient,
+  submitPatientSign,
   HekimError,
 } from "@/lib/server/hekim";
 import { body, handle, int, str } from "@/lib/server/http";
@@ -37,9 +41,38 @@ export async function POST(req: NextRequest, ctx: RouteContext<"/api/cases/[id]"
         return { signable: await prepareFund(id, str(b.address, "Address")) };
       case "prepare-approve":
         return { signable: await prepareApprove(id, str(b.address, "Address"), int(b.idx, "Stage")) };
-      case "prepare-dispute":
+      case "prepare-dispute": {
+        const kind = String(b.kind ?? "patient");
+        if (kind !== "patient" && kind !== "not_started" && kind !== "not_finished") {
+          throw new HekimError("Unknown claim");
+        }
         return {
-          signable: await prepareDispute(id, str(b.address, "Address"), int(b.idx, "Stage"), String(b.note ?? "")),
+          signable: await prepareDispute(id, str(b.address, "Address"), int(b.idx, "Stage"), String(b.note ?? ""), kind),
+        };
+      }
+      case "clinic-sign": {
+        const phase = str(b.phase, "Phase");
+        if (phase !== "entry" && phase !== "exit") throw new HekimError("Unknown phase");
+        return await clinicSign(id, int(b.idx, "Stage"), phase, String(b.statement ?? ""));
+      }
+      case "clinic-checkin":
+        return { checkin: clinicCheckin(id, int(b.idx, "Stage")) };
+      case "sign-prepare": {
+        const phase = str(b.phase, "Phase");
+        if (phase !== "entry" && phase !== "exit") throw new HekimError("Unknown phase");
+        return {
+          request: await preparePatientSign(
+            id,
+            str(b.address, "Address"),
+            int(b.idx, "Stage"),
+            phase,
+            typeof b.checkin === "string" && b.checkin ? b.checkin : null,
+          ),
+        };
+      }
+      case "sign-submit":
+        return {
+          case: await submitPatientSign(id, str(b.address, "Address"), str(b.nonce, "Nonce"), str(b.signature, "Signature")),
         };
       case "submit": {
         const kind = str(b.kind, "Kind");

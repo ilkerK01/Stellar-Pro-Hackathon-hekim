@@ -107,6 +107,7 @@ for (const role of ["PLATFORM", "CLINIC", "ARBITER"]) {
   if (!env[`${role}_SECRET`]) env[`${role}_SECRET`] = Keypair.random().secret();
 }
 env.APPROVAL_WINDOW_MINUTES ??= "2";
+env.SIGNATURE_WINDOW_MINUTES ??= "2";
 env.PLATFORM_FEE_PERCENT ??= "1";
 env.TW_PROTOCOL_FEE_PERCENT ??= "0.3";
 env.CLINIC_NAME ??= "Bosphorus Dental & Aesthetics";

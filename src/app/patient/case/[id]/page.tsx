@@ -6,7 +6,10 @@ export async function generateMetadata({ params }: PageProps<"/patient/case/[id]
   return { title: id };
 }
 
-export default async function PatientCasePage({ params }: PageProps<"/patient/case/[id]">) {
+export default async function PatientCasePage({ params, searchParams }: PageProps<"/patient/case/[id]">) {
   const { id } = await params;
-  return <PatientCase id={id} />;
+  const query = await searchParams;
+  const nonce = typeof query.checkin === "string" ? query.checkin : null;
+  const stage = typeof query.stage === "string" ? Number(query.stage) : NaN;
+  return <PatientCase id={id} checkin={nonce && Number.isInteger(stage) ? { stage, nonce } : null} />;
 }

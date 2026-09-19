@@ -89,8 +89,8 @@ jobs:
       - name: Run every flow on testnet
         if: steps.gate.outputs.enabled == 'true'
         env:
-          TRY: "1500"
-        run: npm run e2e -- wallet,topup,happy,clean,noshow,noresponse,payout,registry
+          TRY: "3000"
+        run: npm run e2e -- wallet,topup,happy,clean,signed,gaps,noshow,noresponse,payout,registry
 
       - name: App log
         if: failure() && steps.gate.outputs.enabled == 'true'

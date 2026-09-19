@@ -2,22 +2,139 @@
 
 import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
-import { errorMessage } from "@/lib/client/api";
+import { api, errorMessage } from "@/lib/client/api";
 import type { CaseView, Milestone } from "@/lib/types";
 import { ActivityLog, CaseHeader, CaseSummary, StageTrack, useNow } from "./case-parts";
+import { CheckinQr } from "./checkin-qr";
 import { useLang } from "./lang";
 import { SiteFooter, SiteHeader } from "./site-header";
 import { AppHero, Button, Card, Copy, ErrorText, Notice, Textarea } from "./ui";
 import { useCase } from "./use-case";
 
+type Checkin = { nonce: string; expiresAt: string };
+
+function ClinicSignActions({
+  caseView,
+  m,
+  onCase,
+}: {
+  caseView: CaseView;
+  m: Milestone;
+  onCase: (c: CaseView) => void;
+}) {
+  const { t } = useLang();
+  const now = useNow();
+  const [scope, setScope] = useState("");
+  const [done, setDone] = useState("");
+  const [note, setNote] = useState("");
+  const [checkin, setCheckin] = useState<Checkin | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const call = async (key: string, body: Record<string, unknown>) => {
+    setBusy(key);
+    setError(null);
+    try {
+      const res = await api<{ case?: CaseView; checkin?: Checkin | null }>(`/api/cases/${caseView.id}`, { body });
+      if (res.case) onCase(res.case);
+      if (res.checkin !== undefined) setCheckin(res.checkin);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clinicEntry = m.attestations.find((a) => a.phase === "entry" && a.role === "clinic");
+  const patientEntry = m.attestations.find((a) => a.phase === "entry" && a.role === "patient");
+  const expired = m.signatureDue ? new Date(m.signatureDue.due).getTime() <= now : false;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-ink-3">{t("sig.rule")}</p>
+      {!clinicEntry && (
+        <div className="space-y-2">
+          {patientEntry && <Notice tone="amber">{t("clinic.waitPatientStart")}</Notice>}
+          <label className="block text-xs font-medium text-ink-2">{t("clinic.scopeLabel")}</label>
+          <Textarea placeholder={t("clinic.scopePlaceholder")} value={scope} onChange={(e) => setScope(e.target.value)} />
+          <Button
+            size="sm"
+            busy={busy === "entry"}
+            disabled={!scope.trim() || !!busy}
+            onClick={() => call("entry", { action: "clinic-sign", idx: m.idx, phase: "entry", statement: scope })}
+          >
+            {t("clinic.signScope")}
+          </Button>
+        </div>
+      )}
+      {clinicEntry && !patientEntry && (
+        <div className="space-y-2">
+          {checkin ? (
+            <CheckinQr
+              caseId={caseView.id}
+              idx={m.idx}
+              nonce={checkin.nonce}
+              expiresAt={checkin.expiresAt}
+              busy={busy === "checkin"}
+              onRenew={() => call("checkin", { action: "clinic-checkin", idx: m.idx })}
+            />
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              busy={busy === "checkin"}
+              onClick={() => call("checkin", { action: "clinic-checkin", idx: m.idx })}
+            >
+              {t("clinic.checkinShow")}
+            </Button>
+          )}
+          <p className="text-sm text-ink-3">{t("clinic.waitArrival")}</p>
+          {expired && (
+            <div className="space-y-2">
+              <Textarea placeholder={t("clinic.claimNote")} value={note} onChange={(e) => setNote(e.target.value)} />
+              <Button
+                size="sm"
+                variant="danger"
+                busy={busy === "no_show"}
+                onClick={() =>
+                  call("no_show", { action: "claim", idx: m.idx, kind: "no_show", note: note.trim() || t("clinic.noShow") })
+                }
+              >
+                {t("clinic.noShowSigned")}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {clinicEntry && patientEntry && (
+        <div className="space-y-2">
+          <label className="block text-xs font-medium text-ink-2">{t("clinic.exitLabel")}</label>
+          <Textarea placeholder={t("clinic.exitPlaceholder")} value={done} onChange={(e) => setDone(e.target.value)} />
+          <Button
+            size="sm"
+            busy={busy === "exit"}
+            disabled={!done.trim() || !!busy}
+            onClick={() => call("exit", { action: "clinic-sign", idx: m.idx, phase: "exit", statement: done })}
+          >
+            {t("clinic.signExit")}
+          </Button>
+        </div>
+      )}
+      <ErrorText error={error} />
+    </div>
+  );
+}
+
 function StageActions({
   caseView,
   m,
   act,
+  onCase,
 }: {
   caseView: CaseView;
   m: Milestone;
   act: (body: Record<string, unknown>) => Promise<CaseView>;
+  onCase: (c: CaseView) => void;
 }) {
   const { t } = useLang();
   const now = useNow();
@@ -46,6 +163,7 @@ function StageActions({
 
   if (m.status === "pending") {
     if (previousOpen) return <p className="text-xs text-ink-3">{t("clinic.previousFirst")}</p>;
+    if (caseView.signaturesRequired) return <ClinicSignActions caseView={caseView} m={m} onCase={onCase} />;
     return (
       <div className="space-y-2">
         <Textarea
@@ -135,7 +253,7 @@ function StageActions({
 
 export function ClinicCase({ id }: { id: string }) {
   const { t } = useLang();
-  const { caseView, error, act } = useCase(id);
+  const { caseView, error, act, setCaseView } = useCase(id);
   const origin = useSyncExternalStore(
     () => () => {},
     () => window.location.origin,
@@ -172,7 +290,7 @@ export function ClinicCase({ id }: { id: string }) {
               )}
               <StageTrack
                 caseView={caseView}
-                renderActions={(m) => <StageActions caseView={caseView} m={m} act={act} />}
+                renderActions={(m) => <StageActions caseView={caseView} m={m} act={act} onCase={setCaseView} />}
               />
               {caseView.status === "closed" && (
                 <Notice tone={caseView.registryTx ? "green" : "amber"}>

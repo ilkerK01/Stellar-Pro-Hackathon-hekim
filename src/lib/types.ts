@@ -2,7 +2,26 @@ export type CaseStatus = "open" | "accepted" | "funded" | "closed";
 
 export type MilestoneStatus = "pending" | "completed" | "approved" | "released" | "disputed" | "resolved";
 
-export type DisputeKind = "patient" | "no_response" | "no_show" | "cancel";
+export type DisputeKind = "patient" | "no_response" | "no_show" | "not_started" | "not_finished" | "cancel";
+
+export type AttestationView = {
+  phase: "entry" | "exit";
+  role: "patient" | "clinic";
+  statement: string;
+  statementHash: string;
+  message: string;
+  digest: string;
+  signature: string;
+  signer: string;
+  inPerson: boolean;
+  signedAt: string;
+  chainTx: string | null;
+};
+
+export type SignatureDue = {
+  kind: "no_show" | "not_started" | "not_finished";
+  due: string;
+};
 
 export type Milestone = {
   idx: number;
@@ -17,6 +36,8 @@ export type Milestone = {
   patientShare: number | null;
   evidenceHash: string | null;
   evidenceTx: string | null;
+  attestations: AttestationView[];
+  signatureDue: SignatureDue | null;
 };
 
 export type CaseEvent = {
@@ -55,6 +76,7 @@ export type CaseView = {
   fundedAt: string | null;
   registryTx: string | null;
   registryCheck: { score: number; cases: number } | null;
+  signaturesRequired: boolean;
   milestones: Milestone[];
   events: CaseEvent[];
   ramps: Ramp[];
@@ -68,9 +90,18 @@ export type Rules = {
   platformFeePercent: number;
   protocolFeePercent: number;
   noShowPatientPercent: number;
+  signatureWindowMinutes: number;
 };
 
 export type Signable = {
   xdr: string;
   networkPassphrase: string;
+};
+
+export type SignRequest = {
+  nonce: string;
+  statement: string;
+  message: string;
+  digest: string;
+  inPerson: boolean;
 };

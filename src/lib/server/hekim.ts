@@ -1,8 +1,19 @@
 import "server-only";
-import { randomBytes } from "node:crypto";
-import { TransactionBuilder } from "@stellar/stellar-sdk";
+import { createHash, randomBytes } from "node:crypto";
+import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
+import {
+  attestMessage,
+  patientEntryStatement,
+  patientExitStatement,
+  PHASE_CODE,
+  ROLE_CODE,
+  SEP53_PREFIX,
+  type Phase,
+  type Role,
+} from "@/lib/attest";
 import { fromStroops, percentOf, toStroops } from "@/lib/money";
 import type {
+  AttestationView,
   CaseEvent,
   CaseStatus,
   CaseView,
@@ -12,6 +23,8 @@ import type {
   Ramp,
   Rules,
   Signable,
+  SignatureDue,
+  SignRequest,
 } from "@/lib/types";
 import * as anchor from "./anchor";
 import { db, now } from "./db";
@@ -46,6 +59,7 @@ type CaseRow = {
   registry_tx: string | null;
   registry_score: number | null;
   registry_cases: number | null;
+  signatures_required: number;
 };
 
 type MilestoneRow = {
@@ -94,6 +108,7 @@ export function rules(): Rules {
     platformFeePercent: env.platformFeePercent,
     protocolFeePercent: env.protocolFeePercent,
     noShowPatientPercent: NO_SHOW_PATIENT_PERCENT,
+    signatureWindowMinutes: env.signatureWindowMinutes,
   };
 }
 
@@ -162,7 +177,77 @@ function approvalDue(row: MilestoneRow): string | null {
   ).toISOString();
 }
 
-function toMilestone(row: MilestoneRow): Milestone {
+type AttestationRow = {
+  case_id: string;
+  idx: number;
+  phase: Phase;
+  role: Role;
+  statement: string;
+  statement_hash: string;
+  nonce: string;
+  message: string;
+  digest: string;
+  signature: string;
+  signer: string;
+  in_person: number;
+  signed_at: string;
+  chain_tx: string | null;
+};
+
+type StageSignatures = Partial<Record<`${Phase}:${Role}`, AttestationRow>>;
+
+function attestationRows(caseId: string): AttestationRow[] {
+  return db()
+    .prepare("select * from attestations where case_id = ? order by signed_at")
+    .all(caseId) as AttestationRow[];
+}
+
+function stageSignatures(rows: AttestationRow[], idx: number): StageSignatures {
+  const out: StageSignatures = {};
+  for (const r of rows) if (r.idx === idx) out[`${r.phase}:${r.role}`] = r;
+  return out;
+}
+
+function toAttestation(r: AttestationRow): AttestationView {
+  return {
+    phase: r.phase,
+    role: r.role,
+    statement: r.statement,
+    statementHash: r.statement_hash,
+    message: r.message,
+    digest: r.digest,
+    signature: r.signature,
+    signer: r.signer,
+    inPerson: r.in_person === 1,
+    signedAt: r.signed_at,
+    chainTx: r.chain_tx,
+  };
+}
+
+function signatureWindowMs(): number {
+  return env.signatureWindowMinutes * 60_000;
+}
+
+function signatureDue(row: CaseRow, m: MilestoneRow, sigs: StageSignatures): SignatureDue | null {
+  if (!row.signatures_required || row.status !== "funded" || m.status !== "pending") return null;
+  const clinicEntry = sigs["entry:clinic"];
+  const patientEntry = sigs["entry:patient"];
+  const at = (r: AttestationRow) => new Date(r.signed_at).getTime();
+  if (clinicEntry && !patientEntry) {
+    return { kind: "no_show", due: new Date(at(clinicEntry) + signatureWindowMs()).toISOString() };
+  }
+  if (patientEntry && !clinicEntry) {
+    return { kind: "not_started", due: new Date(at(patientEntry) + signatureWindowMs()).toISOString() };
+  }
+  if (patientEntry && clinicEntry) {
+    const started = Math.max(at(patientEntry), at(clinicEntry));
+    return { kind: "not_finished", due: new Date(started + signatureWindowMs()).toISOString() };
+  }
+  return null;
+}
+
+function toMilestone(row: MilestoneRow, caseRowValue?: CaseRow, attestations: AttestationRow[] = []): Milestone {
+  const sigs = stageSignatures(attestations, row.idx);
   return {
     idx: row.idx,
     title: row.title,
@@ -176,6 +261,8 @@ function toMilestone(row: MilestoneRow): Milestone {
     patientShare: row.patient_share,
     evidenceHash: row.evidence_hash,
     evidenceTx: row.evidence_tx,
+    attestations: attestations.filter((a) => a.idx === row.idx).map(toAttestation),
+    signatureDue: caseRowValue ? signatureDue(caseRowValue, row, sigs) : null,
   };
 }
 
@@ -195,6 +282,7 @@ function toRamp(row: RampRow): Ramp {
 export function getCase(id: string): CaseView {
   const row = caseRow(id);
   const ms = milestoneRows(id);
+  const attestations = attestationRows(id);
   const events = db()
     .prepare("select * from events where case_id = ? order by id desc")
     .all(id) as EventRow[];
@@ -232,7 +320,8 @@ export function getCase(id: string): CaseView {
       row.registry_score === null || row.registry_cases === null
         ? null
         : { score: row.registry_score, cases: row.registry_cases },
-    milestones: ms.map(toMilestone),
+    signaturesRequired: row.signatures_required === 1,
+    milestones: ms.map((m) => toMilestone(m, row, attestations)),
     events: events.map(
       (e): CaseEvent => ({
         id: e.id,
@@ -339,7 +428,7 @@ export async function createCase(input: NewCase): Promise<CaseView> {
   try {
     database
       .prepare(
-        "insert into cases (id, title, treatment, patient_name, patient_email, clinic_name, total, status, created_at) values (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+        "insert into cases (id, title, treatment, patient_name, patient_email, clinic_name, total, status, created_at, signatures_required) values (?, ?, ?, ?, ?, ?, ?, 'open', ?, 1)",
       )
       .run(id, title, treatment, patientName, patientEmail, clinicName, fromStroops(totalStroops), created);
     const insert = database.prepare(
@@ -361,12 +450,19 @@ function assertPatient(row: CaseRow, address: string) {
   }
 }
 
-function createIntent(caseId: string, action: string, xdr: string, idx: number | null = null, note: string | null = null) {
+function createIntent(
+  caseId: string,
+  action: string,
+  xdr: string,
+  idx: number | null = null,
+  note: string | null = null,
+  kind: string | null = null,
+) {
   db()
     .prepare(
-      "insert or replace into intents (tx_hash, case_id, action, idx, note, created_at) values (?, ?, ?, ?, ?, ?)",
+      "insert or replace into intents (tx_hash, case_id, action, idx, note, kind, created_at) values (?, ?, ?, ?, ?, ?, ?)",
     )
-    .run(txHash(xdr), caseId, action, idx, note, now());
+    .run(txHash(xdr), caseId, action, idx, note, kind, now());
   return signable(xdr);
 }
 
@@ -374,10 +470,10 @@ function consumeIntent(caseId: string, action: string, signedXdr: string) {
   const hash = txHash(signedXdr);
   const row = db()
     .prepare("select * from intents where tx_hash = ? and case_id = ? and action = ?")
-    .get(hash, caseId, action) as { idx: number | null; note: string | null } | undefined;
+    .get(hash, caseId, action) as { idx: number | null; note: string | null; kind: string | null } | undefined;
   if (!row) throw new HekimError("This signature does not match a prepared action", 409);
   db().prepare("delete from intents where tx_hash = ?").run(hash);
-  return { idx: row.idx, note: row.note, hash };
+  return { idx: row.idx, note: row.note, kind: row.kind, hash };
 }
 
 export async function acceptCase(caseId: string, address: string, email: string): Promise<CaseView> {
@@ -449,11 +545,14 @@ export async function prepareApprove(caseId: string, address: string, idx: numbe
   return createIntent(caseId, "approve", xdr, idx);
 }
 
+export type PatientClaim = "patient" | "not_started" | "not_finished";
+
 export async function prepareDispute(
   caseId: string,
   address: string,
   idx: number,
   note: string,
+  kind: PatientClaim = "patient",
 ): Promise<Signable> {
   const row = caseRow(caseId);
   assertPatient(row, address);
@@ -462,9 +561,22 @@ export async function prepareDispute(
   if (m.status !== "pending" && m.status !== "completed") {
     throw new HekimError("This stage can no longer be disputed");
   }
+  if (kind !== "patient") {
+    const due = signatureDue(row, m, stageSignatures(attestationRows(caseId), idx));
+    if (!due || due.kind !== kind) {
+      throw new HekimError(
+        kind === "not_started"
+          ? "This claim needs your arrival signature and a missing clinic signature"
+          : "This claim needs both arrival signatures and a missing clinic exit signature",
+      );
+    }
+    if (Date.now() < new Date(due.due).getTime()) {
+      throw new HekimError("The clinic still has time to sign");
+    }
+  }
   const reason = text(note, "Reason", 500);
   const xdr = await tw.dispute(row.contract_id!, idx, address);
-  return createIntent(caseId, "dispute", xdr, idx, reason);
+  return createIntent(caseId, "dispute", xdr, idx, reason, kind);
 }
 
 export async function submitPatient(
@@ -487,8 +599,15 @@ export async function submitPatient(
     await releaseStage(caseId, idx);
   } else {
     const idx = intent.idx!;
-    setMilestone(caseId, idx, { status: "disputed", dispute_kind: "patient", dispute_note: intent.note });
-    logEvent(caseId, "patient", "dispute_opened", intent.note, intent.hash);
+    const kind = (intent.kind ?? "patient") as PatientClaim;
+    setMilestone(caseId, idx, { status: "disputed", dispute_kind: kind, dispute_note: intent.note });
+    logEvent(
+      caseId,
+      "patient",
+      kind === "not_started" ? "not_started_reported" : kind === "not_finished" ? "not_finished_reported" : "dispute_opened",
+      intent.note,
+      intent.hash,
+    );
   }
   return getCase(caseId);
 }
@@ -565,9 +684,17 @@ export async function retryRegistry(caseId: string): Promise<CaseView> {
   return getCase(caseId);
 }
 
-export async function completeStage(caseId: string, idx: number, evidence: string): Promise<CaseView> {
+export async function completeStage(
+  caseId: string,
+  idx: number,
+  evidence: string,
+  fromExitSignature = false,
+): Promise<CaseView> {
   const row = caseRow(caseId);
   if (row.status !== "funded") throw new HekimError("The patient has not funded this plan yet");
+  if (row.signatures_required && !fromExitSignature) {
+    throw new HekimError("This plan uses dual signatures: complete the stage with the clinic's exit signature");
+  }
   const ms = milestoneRows(caseId);
   const m = ms[idx];
   if (!m) throw new HekimError("Milestone not found", 404);
@@ -612,6 +739,14 @@ export async function clinicClaim(
     if (m.status !== "completed" || !due) throw new HekimError("This stage is not waiting for approval");
     if (Date.now() < new Date(due).getTime()) {
       throw new HekimError("The patient still has time to respond");
+    }
+  } else if (row.signatures_required) {
+    const due = signatureDue(row, m, stageSignatures(attestationRows(caseId), idx));
+    if (!due || due.kind !== "no_show") {
+      throw new HekimError("A no-show needs the clinic's arrival signature and a missing patient signature");
+    }
+    if (Date.now() < new Date(due.due).getTime()) {
+      throw new HekimError("The patient still has time to sign in");
     }
   } else {
     if (idx !== 0 || m.status !== "pending") {
@@ -856,4 +991,300 @@ export async function clinicProfile() {
     registryContractId: env.registryContractId || null,
     record,
   };
+}
+
+const CHECKIN_MINUTES = 10;
+const SIGN_REQUEST_MINUTES = 15;
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function sep53Digest(message: string): Buffer {
+  return createHash("sha256").update(SEP53_PREFIX + message).digest();
+}
+
+function inMinutes(minutes: number): string {
+  return new Date(Date.now() + minutes * 60_000).toISOString();
+}
+
+function requireSignedPlan(row: CaseRow) {
+  if (!row.signatures_required) throw new HekimError("This plan was created before dual signatures");
+  if (row.status !== "funded") throw new HekimError("The plan is not funded");
+}
+
+function requirePreviousSettled(caseId: string, idx: number) {
+  const ms = milestoneRows(caseId);
+  if (ms.slice(0, idx).some((p) => p.status !== "released" && p.status !== "resolved")) {
+    throw new HekimError("Finish the previous stage first");
+  }
+}
+
+function saveAttestation(input: {
+  caseId: string;
+  idx: number;
+  phase: Phase;
+  role: Role;
+  statement: string;
+  nonce: string;
+  message: string;
+  digest: Buffer;
+  signature: Buffer;
+  signer: string;
+  inPerson: boolean;
+}) {
+  db()
+    .prepare(
+      "insert into attestations (case_id, idx, phase, role, statement, statement_hash, nonce, message, digest, signature, signer, in_person, signed_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      input.caseId,
+      input.idx,
+      input.phase,
+      input.role,
+      input.statement,
+      sha256Hex(input.statement),
+      input.nonce,
+      input.message,
+      input.digest.toString("hex"),
+      input.signature.toString("base64"),
+      input.signer,
+      input.inPerson ? 1 : 0,
+      now(),
+    );
+}
+
+async function anchorAttestation(
+  caseId: string,
+  idx: number,
+  phase: Phase,
+  role: Role,
+  signer: string,
+  digest: Buffer,
+  signature: Buffer,
+) {
+  if (!registry.registryEnabled()) return;
+  try {
+    const result = await registry.attest({
+      caseId,
+      stage: idx,
+      phase: PHASE_CODE[phase],
+      role: ROLE_CODE[role],
+      signer: Buffer.from(Keypair.fromPublicKey(signer).rawPublicKey()),
+      digest,
+      signature,
+    });
+    db()
+      .prepare("update attestations set chain_tx = ? where case_id = ? and idx = ? and phase = ? and role = ?")
+      .run(result.hash, caseId, idx, phase, role);
+    logEvent(caseId, "platform", "attestation_anchored", `${role} ${phase} signature, stage ${idx + 1}`, result.hash);
+  } catch (error) {
+    logEvent(caseId, "platform", "registry_failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function issueCheckin(caseId: string, idx: number): { nonce: string; expiresAt: string } {
+  db()
+    .prepare(
+      "delete from sign_intents where case_id = ? and idx = ? and role = 'patient' and phase = 'entry' and in_person = 1",
+    )
+    .run(caseId, idx);
+  const nonce = randomBytes(12).toString("hex");
+  const expiresAt = inMinutes(CHECKIN_MINUTES);
+  db()
+    .prepare(
+      "insert into sign_intents (nonce, case_id, idx, phase, role, statement, in_person, expires_at, created_at) values (?, ?, ?, 'entry', 'patient', '', 1, ?, ?)",
+    )
+    .run(nonce, caseId, idx, expiresAt, now());
+  return { nonce, expiresAt };
+}
+
+export async function clinicSign(
+  caseId: string,
+  idx: number,
+  phase: Phase,
+  statementInput: string,
+): Promise<{ case: CaseView; checkin: { nonce: string; expiresAt: string } | null }> {
+  const row = caseRow(caseId);
+  requireSignedPlan(row);
+  const m = milestoneRow(caseId, idx);
+  if (m.status !== "pending") throw new HekimError("This stage is not open");
+  requirePreviousSettled(caseId, idx);
+  const sigs = stageSignatures(attestationRows(caseId), idx);
+  if (sigs[`${phase}:clinic`]) throw new HekimError("The clinic has already signed this");
+  if (phase === "exit" && (!sigs["entry:clinic"] || !sigs["entry:patient"])) {
+    throw new HekimError("Both arrival signatures are needed before the stage can be completed");
+  }
+  const statement = text(statementInput, phase === "entry" ? "Scope" : "Work done", 500);
+  const clinic = keys.clinic();
+  const nonce = randomBytes(12).toString("hex");
+  const message = attestMessage({
+    caseId,
+    stage: idx,
+    phase,
+    role: "clinic",
+    statementHash: sha256Hex(statement),
+    at: now(),
+    nonce,
+  });
+  const digest = sep53Digest(message);
+  const signature = Buffer.from(clinic.sign(digest));
+  saveAttestation({
+    caseId,
+    idx,
+    phase,
+    role: "clinic",
+    statement,
+    nonce,
+    message,
+    digest,
+    signature,
+    signer: clinic.publicKey(),
+    inPerson: false,
+  });
+  logEvent(caseId, "clinic", phase === "entry" ? "entry_signed" : "exit_signed", `${m.title}: ${statement}`);
+  await anchorAttestation(caseId, idx, phase, "clinic", clinic.publicKey(), digest, signature);
+  let checkin: { nonce: string; expiresAt: string } | null = null;
+  if (phase === "entry" && !sigs["entry:patient"]) checkin = issueCheckin(caseId, idx);
+  if (phase === "exit") await completeStage(caseId, idx, statement, true);
+  return { case: getCase(caseId), checkin };
+}
+
+export function clinicCheckin(caseId: string, idx: number): { nonce: string; expiresAt: string } {
+  const row = caseRow(caseId);
+  requireSignedPlan(row);
+  const m = milestoneRow(caseId, idx);
+  const sigs = stageSignatures(attestationRows(caseId), idx);
+  if (m.status !== "pending" || !sigs["entry:clinic"] || sigs["entry:patient"]) {
+    throw new HekimError("There is no arrival waiting for this stage");
+  }
+  return issueCheckin(caseId, idx);
+}
+
+export async function preparePatientSign(
+  caseId: string,
+  address: string,
+  idx: number,
+  phase: Phase,
+  checkin: string | null,
+): Promise<SignRequest> {
+  const row = caseRow(caseId);
+  assertPatient(row, address);
+  requireSignedPlan(row);
+  const m = milestoneRow(caseId, idx);
+  const sigs = stageSignatures(attestationRows(caseId), idx);
+  if (sigs[`${phase}:patient`]) throw new HekimError("You have already signed this");
+  let statement: string;
+  if (phase === "entry") {
+    if (m.status !== "pending") throw new HekimError("This stage is not open");
+    requirePreviousSettled(caseId, idx);
+    const scope = sigs["entry:clinic"]?.statement ?? "the clinic has not signed its scope yet";
+    statement = patientEntryStatement(row.clinic_name, idx, m.title, scope);
+  } else {
+    if (!sigs["exit:clinic"]) throw new HekimError("The clinic has not signed this stage as done yet");
+    statement = patientExitStatement(idx, m.title);
+  }
+  let nonce: string;
+  let inPerson = false;
+  if (phase === "entry" && checkin) {
+    const intent = db()
+      .prepare(
+        "select * from sign_intents where nonce = ? and case_id = ? and idx = ? and role = 'patient' and phase = 'entry' and in_person = 1",
+      )
+      .get(checkin, caseId, idx) as { expires_at: string } | undefined;
+    if (!intent || new Date(intent.expires_at).getTime() < Date.now()) {
+      throw new HekimError("This check-in code has expired. Ask the clinic to show a new one.", 410);
+    }
+    nonce = checkin;
+    inPerson = true;
+  } else {
+    nonce = randomBytes(12).toString("hex");
+  }
+  const message = attestMessage({
+    caseId,
+    stage: idx,
+    phase,
+    role: "patient",
+    statementHash: sha256Hex(statement),
+    at: now(),
+    nonce,
+  });
+  const digest = sep53Digest(message).toString("hex");
+  db()
+    .prepare(
+      "insert into sign_intents (nonce, case_id, idx, phase, role, statement, message, digest, in_person, expires_at, created_at) values (?, ?, ?, ?, 'patient', ?, ?, ?, ?, ?, ?) on conflict(nonce) do update set statement = excluded.statement, message = excluded.message, digest = excluded.digest, expires_at = excluded.expires_at",
+    )
+    .run(nonce, caseId, idx, phase, statement, message, digest, inPerson ? 1 : 0, inMinutes(SIGN_REQUEST_MINUTES), now());
+  return { nonce, statement, message, digest, inPerson };
+}
+
+function decodeSignature(value: string): Buffer {
+  const trimmed = value.trim();
+  const hex = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
+  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Buffer.from(hex, "hex");
+  const buf = Buffer.from(trimmed, "base64");
+  if (buf.length !== 64) throw new HekimError("Invalid signature");
+  return buf;
+}
+
+export async function submitPatientSign(
+  caseId: string,
+  address: string,
+  nonce: string,
+  signatureValue: string,
+): Promise<CaseView> {
+  const row = caseRow(caseId);
+  assertPatient(row, address);
+  requireSignedPlan(row);
+  const intent = db()
+    .prepare("select * from sign_intents where nonce = ? and case_id = ? and role = 'patient'")
+    .get(nonce, caseId) as
+    | {
+        idx: number;
+        phase: Phase;
+        statement: string;
+        message: string | null;
+        digest: string | null;
+        in_person: number;
+        expires_at: string;
+      }
+    | undefined;
+  if (!intent || !intent.message || !intent.digest) throw new HekimError("This signature request was not found", 404);
+  if (new Date(intent.expires_at).getTime() < Date.now()) {
+    throw new HekimError("This signature request has expired, start again", 410);
+  }
+  const digest = Buffer.from(intent.digest, "hex");
+  if (!sep53Digest(intent.message).equals(digest)) throw new HekimError("Signature request is corrupted", 500);
+  const signature = decodeSignature(signatureValue);
+  if (!Keypair.fromPublicKey(row.patient_address!).verify(digest, signature)) {
+    throw new HekimError("The signature does not match this plan's patient wallet", 400);
+  }
+  const sigs = stageSignatures(attestationRows(caseId), intent.idx);
+  if (sigs[`${intent.phase}:patient`]) throw new HekimError("You have already signed this");
+  saveAttestation({
+    caseId,
+    idx: intent.idx,
+    phase: intent.phase,
+    role: "patient",
+    statement: intent.statement,
+    nonce,
+    message: intent.message,
+    digest,
+    signature,
+    signer: row.patient_address!,
+    inPerson: intent.in_person === 1,
+  });
+  db().prepare("delete from sign_intents where nonce = ?").run(nonce);
+  logEvent(
+    caseId,
+    "patient",
+    intent.phase === "entry" ? "entry_signed" : "exit_signed",
+    intent.phase === "entry"
+      ? intent.in_person === 1
+        ? "in person, clinic check-in code"
+        : "self-declared arrival"
+      : intent.statement,
+  );
+  await anchorAttestation(caseId, intent.idx, intent.phase, "patient", row.patient_address!, digest, signature);
+  return getCase(caseId);
 }

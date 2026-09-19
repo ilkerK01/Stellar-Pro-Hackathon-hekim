@@ -16,6 +16,7 @@ Escrow itself runs on Trustless Work multi-release contracts. This contract answ
 | `Clinic(Address)` | persistent | name, country, registration time, case counters, volume, released and refunded totals |
 | `Case(String)` | persistent | clinic, amount, released, refunded, number of disputes, outcome, evidence root, close time |
 | `Evidence(String, u32)` | persistent | SHA-256 of a stage's evidence note and the ledger time it was anchored |
+| `Attestation(String, u32, u32, u32)` | persistent | case, stage, phase (0 start, 1 end), role (0 patient, 1 clinic): signer public key, SEP-53 digest, signature, ledger time |
 
 Amounts are `i128` in stroops (7 decimals, USDC). Every write extends the TTL of the entries it touched and of the instance to about 120 days.
 
@@ -27,6 +28,8 @@ Amounts are `i128` in stroops (7 decimals, USDC). Every write extends the TTL of
 | `register_clinic(clinic, name, country)` | admin | creates a clinic record, fails if it exists |
 | `anchor_evidence(case_id, stage, hash)` | admin | stores the hash of a stage's evidence note once; the note itself never goes on chain |
 | `record_case(case_id, clinic, amount, released, refunded, disputes, evidence_root)` | admin | writes the outcome of a closed case once and updates the clinic's counters, returns the `Outcome` |
+| `attest(case_id, stage, phase, role, signer, digest, signature)` | admin | runs `ed25519_verify(signer, digest, signature)` and stores the signature once; a forged signature aborts the transaction |
+| `attestation(case_id, stage, phase, role)` | none | stored signature or `None` |
 | `clinic(clinic)` | none | clinic record or `None` |
 | `case(case_id)` | none | case record or `None` |
 | `evidence(case_id, stage)` | none | evidence hash or `None` |
@@ -42,6 +45,7 @@ Amounts are `i128` in stroops (7 decimals, USDC). Every write extends the TTL of
 | `ClinicRegistered` | clinic | name, country |
 | `EvidenceAnchored` | case_id | stage, hash |
 | `CaseRecorded` | clinic | case_id, outcome, amount, refunded |
+| `AttestationRecorded` | case_id | stage, phase, role, signer, digest |
 
 ## Errors
 
@@ -52,6 +56,8 @@ Amounts are `i128` in stroops (7 decimals, USDC). Every write extends the TTL of
 | 3 | `CaseAlreadyRecorded` |
 | 4 | `InvalidAmounts` (negative values, zero amount, or released + refunded above amount) |
 | 5 | `EvidenceAlreadyAnchored` |
+| 6 | `AttestationAlreadyRecorded` |
+| 7 | `InvalidAttestation` (phase or role out of range) |
 
 ## Verifying evidence
 
@@ -66,4 +72,8 @@ stellar contract deploy --wasm target/wasm32v1-none/release/hekim_registry.wasm 
   --source-account <PLATFORM_SECRET> --network testnet -- --admin <PLATFORM_ADDRESS>
 ```
 
-Seven unit tests cover clinic registration, the three outcomes and the trust score, rejected writes, one-time evidence anchoring, the admin auth requirement, the recorded auth tree and the published event topics.
+Nine unit tests cover clinic registration, the three outcomes and the trust score, rejected writes, one-time evidence anchoring, the admin auth requirement, the recorded auth tree, the published event topics, a verified signature stored once and a forged signature that aborts.
+
+## Verifying a stage signature
+
+Every stage of a new plan carries up to four signatures. The signed digest is the [SEP-53](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0053.md) message hash `sha256("Stellar Signed Message:\n" + message)`, where `message` is a JSON object with the case id, stage, role, phase, the SHA-256 of the signed statement, the time and a one-time nonce. `attest` verifies it on chain with `ed25519_verify`, so anyone can read `attestation(...)` and know the signature is genuine without trusting hekim.

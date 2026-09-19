@@ -120,6 +120,11 @@ export function StageTrack({
                 )}
               </div>
             )}
+            {caseView.signaturesRequired && caseView.status !== "open" && caseView.status !== "accepted" && (
+              <div className="mt-3">
+                <SignatureTimeline m={m} />
+              </div>
+            )}
             {renderActions && <div className="mt-3 empty:hidden">{renderActions(m)}</div>}
           </li>
         );
@@ -289,6 +294,87 @@ export function RegistryPanel({ profile, dark = false }: { profile: ClinicProfil
           </a>
         </p>
       )}
+    </div>
+  );
+}
+
+export function SignatureClock({ due }: { due: string }) {
+  const { t } = useLang();
+  const now = useNow();
+  const left = new Date(due).getTime() - now;
+  if (left <= 0) return <Badge tone="coral">{t("sig.dueExpired")}</Badge>;
+  return (
+    <Badge tone="amber" pulse>
+      {t("sig.due", { time: formatLeft(left) })}
+    </Badge>
+  );
+}
+
+export function SignatureTimeline({ m }: { m: Milestone }) {
+  const { t, lang } = useLang();
+  const slots = [
+    { phase: "entry", role: "clinic", label: t("sig.entryClinic") },
+    { phase: "entry", role: "patient", label: t("sig.entryPatient") },
+    { phase: "exit", role: "clinic", label: t("sig.exitClinic") },
+    { phase: "exit", role: "patient", label: t("sig.exitPatient") },
+  ] as const;
+  return (
+    <div className="rounded-2xl border border-teal/15 bg-teal-soft/30 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-medium text-teal-2">{t("sig.title")}</p>
+        {m.signatureDue && <SignatureClock due={m.signatureDue.due} />}
+      </div>
+      <ol className="grid gap-2 sm:grid-cols-2">
+        {slots.map((s, i) => {
+          const a = m.attestations.find((x) => x.phase === s.phase && x.role === s.role);
+          return (
+            <li
+              key={`${s.phase}-${s.role}`}
+              className={`rounded-xl border px-3 py-2 text-xs ${a ? "border-green/30 bg-white" : "border-dashed border-line bg-white/60"}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 font-medium text-ink">
+                  <span
+                    className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${
+                      a ? "bg-green text-white" : "bg-paper-2 text-ink-3"
+                    }`}
+                  >
+                    {a ? "✓" : i + 1}
+                  </span>
+                  {s.label}
+                </span>
+                {a ? (
+                  <time className="text-ink-3" dateTime={a.signedAt}>
+                    {new Date(a.signedAt).toLocaleTimeString(lang === "tr" ? "tr-TR" : "en-GB", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </time>
+                ) : (
+                  <span className="text-ink-3">{t("sig.waiting")}</span>
+                )}
+              </div>
+              {a && (
+                <>
+                  <p className="mt-1 line-clamp-2 text-ink-2">{a.statement}</p>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    {s.phase === "entry" && s.role === "patient" && (
+                      <Badge tone={a.inPerson ? "green" : "amber"}>{a.inPerson ? t("sig.inPerson") : t("sig.selfDeclared")}</Badge>
+                    )}
+                    {a.chainTx ? (
+                      <span className="inline-flex items-center gap-1.5 text-teal">
+                        {t("sig.onChain")} <TxLink hash={a.chainTx} />
+                      </span>
+                    ) : (
+                      <span className="text-ink-3">{t("sig.pendingChain")}</span>
+                    )}
+                  </div>
+                </>
+              )}
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

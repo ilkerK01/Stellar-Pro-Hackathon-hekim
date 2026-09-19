@@ -66,6 +66,36 @@ create table if not exists intents (
   note text,
   created_at text not null
 );
+create table if not exists attestations (
+  case_id text not null,
+  idx integer not null,
+  phase text not null,
+  role text not null,
+  statement text not null,
+  statement_hash text not null,
+  nonce text not null,
+  message text not null,
+  digest text not null,
+  signature text not null,
+  signer text not null,
+  in_person integer not null default 0,
+  signed_at text not null,
+  chain_tx text,
+  primary key (case_id, idx, phase, role)
+);
+create table if not exists sign_intents (
+  nonce text primary key,
+  case_id text not null,
+  idx integer not null,
+  phase text not null,
+  role text not null,
+  statement text not null,
+  message text,
+  digest text,
+  in_person integer not null default 0,
+  expires_at text not null,
+  created_at text not null
+);
 create table if not exists anchor_tokens (
   account text primary key,
   token text not null,
@@ -83,6 +113,11 @@ function open(): DatabaseSync {
   const columns = (db.prepare("pragma table_info(cases)").all() as { name: string }[]).map((c) => c.name);
   if (!columns.includes("registry_score")) db.exec("alter table cases add column registry_score integer");
   if (!columns.includes("registry_cases")) db.exec("alter table cases add column registry_cases integer");
+  if (!columns.includes("signatures_required")) {
+    db.exec("alter table cases add column signatures_required integer not null default 0");
+  }
+  const intentColumns = (db.prepare("pragma table_info(intents)").all() as { name: string }[]).map((c) => c.name);
+  if (!intentColumns.includes("kind")) db.exec("alter table intents add column kind text");
   return db;
 }
 

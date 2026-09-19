@@ -124,6 +124,45 @@ fn publishes_case_event() {
     assert_eq!(topics[1], ScVal::try_from(&clinic).unwrap());
 }
 
+fn signed(env: &Env, seed: u8, digest: [u8; 32]) -> (BytesN<32>, BytesN<32>, BytesN<64>) {
+    use ed25519_dalek::{Signer, SigningKey};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let signature = key.sign(&digest);
+    (
+        BytesN::from_array(env, &key.verifying_key().to_bytes()),
+        BytesN::from_array(env, &digest),
+        BytesN::from_array(env, &signature.to_bytes()),
+    )
+}
+
+#[test]
+fn records_verified_attestation_once() {
+    let (env, client, _) = setup();
+    let (signer, digest, signature) = signed(&env, 4, [5; 32]);
+    client.attest(&text(&env, "HK-1"), &0, &0, &0, &signer, &digest, &signature);
+    let stored = client.attestation(&text(&env, "HK-1"), &0, &0, &0).unwrap();
+    assert_eq!(stored.signer, signer);
+    assert_eq!(stored.digest, digest);
+    assert!(client.attestation(&text(&env, "HK-1"), &0, &0, &1).is_none());
+    assert_eq!(
+        client.try_attest(&text(&env, "HK-1"), &0, &0, &0, &signer, &digest, &signature),
+        Err(Ok(Error::AttestationAlreadyRecorded))
+    );
+    assert_eq!(
+        client.try_attest(&text(&env, "HK-1"), &0, &2, &0, &signer, &digest, &signature),
+        Err(Ok(Error::InvalidAttestation))
+    );
+}
+
+#[test]
+#[should_panic]
+fn rejects_forged_attestation() {
+    let (env, client, _) = setup();
+    let (signer, _, signature) = signed(&env, 4, [5; 32]);
+    let other = BytesN::from_array(&env, &[6; 32]);
+    client.attest(&text(&env, "HK-1"), &0, &0, &0, &signer, &other, &signature);
+}
+
 #[test]
 #[should_panic]
 fn requires_admin_auth() {

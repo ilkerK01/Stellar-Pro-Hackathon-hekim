@@ -5,6 +5,7 @@ import { api, errorMessage } from "@/lib/client/api";
 import type { Key } from "@/lib/i18n";
 import { formatUsdc } from "@/lib/money";
 import type { CaseView, Milestone, Rules } from "@/lib/types";
+import { SignatureTimeline } from "./case-parts";
 import { useLang } from "./lang";
 import { SiteFooter, SiteHeader } from "./site-header";
 import { AppHero, Badge, Button, Card, ContractLink, ErrorText } from "./ui";
@@ -15,6 +16,10 @@ function suggested(kind: Milestone["disputeKind"], rules: Rules | null) {
   if (kind === "no_show") return rules?.noShowPatientPercent ?? 50;
   if (kind === "no_response") return 0;
   return 100;
+}
+
+function filedByPatient(kind: Milestone["disputeKind"]) {
+  return kind === "patient" || kind === "not_started" || kind === "not_finished";
 }
 
 function DisputeCard({ d, rules, onDone }: { d: Dispute; rules: Rules | null; onDone: () => void }) {
@@ -54,7 +59,7 @@ function DisputeCard({ d, rules, onDone }: { d: Dispute; rules: Rules | null; on
             {t(`dispute.${kind}` as Key)}
           </Badge>
           <span className="text-xs text-ink-3">
-            {t("arbiter.filedBy")}: {kind === "patient" ? t("arbiter.byPatient") : t("arbiter.byClinic")}
+            {t("arbiter.filedBy")}: {filedByPatient(kind) ? t("arbiter.byPatient") : t("arbiter.byClinic")}
           </span>
         </div>
       </div>
@@ -70,6 +75,13 @@ function DisputeCard({ d, rules, onDone }: { d: Dispute; rules: Rules | null; on
           {m.evidenceHash && <p className="mt-1 font-mono text-xs text-ink-3">sha256 {m.evidenceHash.slice(0, 20)}…</p>}
         </div>
       </div>
+
+      {c.signaturesRequired && (
+        <div>
+          <p className="mb-2 text-xs font-medium text-ink-3">{t("arbiter.timeline")}</p>
+          <SignatureTimeline m={m} />
+        </div>
+      )}
 
       <div className="rounded-2xl bg-violet-soft/70 p-3 text-sm text-violet">
         <span className="font-medium">{t("arbiter.guide")}: </span>

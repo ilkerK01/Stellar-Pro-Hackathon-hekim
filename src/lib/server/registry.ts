@@ -96,6 +96,26 @@ export async function anchorEvidence(caseId: string, stage: number, hash: Buffer
   return invoke("anchor_evidence", [str(caseId), u32(stage), bytes32(hash)]);
 }
 
+export async function attest(input: {
+  caseId: string;
+  stage: number;
+  phase: number;
+  role: number;
+  signer: Buffer;
+  digest: Buffer;
+  signature: Buffer;
+}) {
+  return invoke("attest", [
+    str(input.caseId),
+    u32(input.stage),
+    u32(input.phase),
+    u32(input.role),
+    bytes32(input.signer),
+    bytes32(input.digest),
+    xdr.ScVal.scvBytes(input.signature),
+  ]);
+}
+
 export async function recordCase(input: {
   caseId: string;
   clinic: string;

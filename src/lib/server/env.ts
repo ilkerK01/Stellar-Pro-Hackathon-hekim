@@ -33,5 +33,6 @@ export const env = {
   platformFeePercent: Number(process.env.PLATFORM_FEE_PERCENT ?? "1"),
   protocolFeePercent: Number(process.env.TW_PROTOCOL_FEE_PERCENT ?? "0.3"),
   approvalWindowMinutes: Number(process.env.APPROVAL_WINDOW_MINUTES ?? "4320"),
+  signatureWindowMinutes: Number(process.env.SIGNATURE_WINDOW_MINUTES ?? "4320"),
   dbPath: process.env.DB_PATH ?? "data/hekim.db",
 };

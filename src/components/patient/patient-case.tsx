@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "@/lib/client/api";
 import { formatUsdc } from "@/lib/money";
-import type { CaseView, Milestone, Signable } from "@/lib/types";
-import { ActivityLog, CaseHeader, CaseSummary, RegistryPanel, StageTrack, type ClinicProfile } from "../case-parts";
+import type { CaseView, Milestone, Signable, SignRequest } from "@/lib/types";
+import { ActivityLog, CaseHeader, CaseSummary, RegistryPanel, StageTrack, useNow, type ClinicProfile } from "../case-parts";
 import { useLang } from "../lang";
 import { SiteFooter, SiteHeader } from "../site-header";
 import { AppHero, Button, Card, ErrorText, Notice, Spinner, Textarea } from "../ui";
@@ -48,7 +48,156 @@ function useSigned(caseId: string, onCase: (c: CaseView) => void) {
   return { busy, error, setError, signed, setBusy };
 }
 
-function StageActions({ caseView, m, onCase }: { caseView: CaseView; m: Milestone; onCase: (c: CaseView) => void }) {
+function PatientSignActions({
+  caseView,
+  m,
+  onCase,
+  checkin,
+}: {
+  caseView: CaseView;
+  m: Milestone;
+  onCase: (c: CaseView) => void;
+  checkin: string | null;
+}) {
+  const { t } = useLang();
+  const now = useNow();
+  const { address, signStatement } = usePatient();
+  const { busy, error, setError, setBusy, signed } = useSigned(caseView.id, onCase);
+  const [request, setRequest] = useState<SignRequest | null>(null);
+  const [note, setNote] = useState("");
+
+  const clinicEntry = m.attestations.find((a) => a.phase === "entry" && a.role === "clinic");
+  const patientEntry = m.attestations.find((a) => a.phase === "entry" && a.role === "patient");
+  const clinicExit = m.attestations.find((a) => a.phase === "exit" && a.role === "clinic");
+  const patientExit = m.attestations.find((a) => a.phase === "exit" && a.role === "patient");
+  const expired = m.signatureDue ? new Date(m.signatureDue.due).getTime() <= now : false;
+
+  const prepare = async (phase: "entry" | "exit") => {
+    setBusy(`prepare-${phase}`);
+    setError(null);
+    try {
+      const res = await api<{ request: SignRequest }>(`/api/cases/${caseView.id}`, {
+        body: { action: "sign-prepare", address, idx: m.idx, phase, checkin: phase === "entry" ? checkin : null },
+      });
+      setRequest(res.request);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirm = async () => {
+    if (!request) return;
+    setBusy("sign");
+    setError(null);
+    try {
+      const signature = await signStatement(request);
+      const res = await api<{ case: CaseView }>(`/api/cases/${caseView.id}`, {
+        body: { action: "sign-submit", address, nonce: request.nonce, signature },
+      });
+      onCase(res.case);
+      setRequest(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (request) {
+    return (
+      <div className="space-y-3 rounded-2xl border border-teal/20 bg-white p-4">
+        <p className="text-xs font-medium text-teal-2">{t("patient.signBox")}</p>
+        <blockquote className="rounded-xl bg-paper px-3 py-2 text-sm text-ink-2">{request.statement}</blockquote>
+        {request.inPerson && <Notice tone="green">{t("patient.arriveQrHint")}</Notice>}
+        {m.status !== "pending" && <Notice tone="amber">{t("patient.exitNote")}</Notice>}
+        <p className="font-mono text-[10px] break-all text-ink-3">SEP-53 · sha256 {request.digest}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" busy={busy === "sign"} onClick={confirm}>
+            {busy === "sign" ? t("common.signing") : t("patient.signConfirm")}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setRequest(null)}>
+            {t("common.cancel")}
+          </Button>
+        </div>
+        <ErrorText error={error} />
+      </div>
+    );
+  }
+
+  const claim = (kind: "not_started" | "not_finished", fallback: string) => (
+    <div className="space-y-2">
+      <Textarea placeholder={t("patient.claimNote")} value={note} onChange={(e) => setNote(e.target.value)} />
+      <Button
+        size="sm"
+        variant="danger"
+        busy={busy?.startsWith(kind)}
+        disabled={!!busy}
+        onClick={() =>
+          signed(kind, { action: "prepare-dispute", idx: m.idx, note: note.trim() || fallback, kind }, "dispute")
+        }
+      >
+        {fallback}
+      </Button>
+    </div>
+  );
+
+  if (m.status === "pending") {
+    return (
+      <div className="space-y-3">
+        <p className="text-xs text-ink-3">{t("sig.rule")}</p>
+        {!patientEntry && (
+          <div className="space-y-2">
+            <Button size="sm" busy={busy === "prepare-entry"} onClick={() => prepare("entry")}>
+              {checkin ? t("patient.arriveQr") : t("patient.arrive")}
+            </Button>
+            <p className="text-xs text-ink-3">{checkin ? t("patient.arriveQrHint") : t("patient.arriveHint")}</p>
+          </div>
+        )}
+        {patientEntry && !clinicEntry && (
+          <>
+            <p className="text-sm text-ink-3">{t("patient.waitClinicStart")}</p>
+            {expired && claim("not_started", t("patient.notStarted"))}
+          </>
+        )}
+        {patientEntry && clinicEntry && !clinicExit && (
+          <>
+            <p className="text-sm text-ink-3">{t("patient.waitClinicFinish")}</p>
+            {expired && claim("not_finished", t("patient.notFinished"))}
+          </>
+        )}
+        <ErrorText error={error} />
+      </div>
+    );
+  }
+
+  if (clinicExit && !patientExit && (m.status === "completed" || m.status === "approved" || m.status === "released")) {
+    return (
+      <div className="space-y-2">
+        <Button size="sm" variant="outline" busy={busy === "prepare-exit"} onClick={() => prepare("exit")}>
+          {t("patient.exitSign")}
+        </Button>
+        <p className="text-xs text-ink-3">{t("patient.exitNote")}</p>
+        <ErrorText error={error} />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function StageActions({
+  caseView,
+  m,
+  onCase,
+  checkin,
+}: {
+  caseView: CaseView;
+  m: Milestone;
+  onCase: (c: CaseView) => void;
+  checkin: string | null;
+}) {
   const { t } = useLang();
   const { busy, error, signed, setBusy, setError } = useSigned(caseView.id, onCase);
   const [disputing, setDisputing] = useState(false);
@@ -85,12 +234,19 @@ function StageActions({ caseView, m, onCase }: { caseView: CaseView; m: Mileston
     );
   }
 
-  if (m.status !== "completed" && m.status !== "pending") return null;
+  if (m.status !== "completed" && m.status !== "pending") {
+    return caseView.signaturesRequired ? (
+      <PatientSignActions caseView={caseView} m={m} onCase={onCase} checkin={null} />
+    ) : null;
+  }
   const previousOpen = caseView.milestones.slice(0, m.idx).some((p) => p.status !== "released" && p.status !== "resolved");
   if (m.status === "pending" && previousOpen) return null;
 
   return (
     <div className="space-y-2">
+      {caseView.signaturesRequired && (
+        <PatientSignActions caseView={caseView} m={m} onCase={onCase} checkin={checkin} />
+      )}
       {m.status === "completed" && m.approvalDue && (
         <p className="text-xs text-ink-3">
           {t("case.approveBy")}: {new Date(m.approvalDue).toLocaleString()}
@@ -131,7 +287,15 @@ function StageActions({ caseView, m, onCase }: { caseView: CaseView; m: Mileston
   );
 }
 
-function CaseBody({ caseView, onCase }: { caseView: CaseView; onCase: (c: CaseView) => void }) {
+function CaseBody({
+  caseView,
+  onCase,
+  checkin,
+}: {
+  caseView: CaseView;
+  onCase: (c: CaseView) => void;
+  checkin: { stage: number; nonce: string } | null;
+}) {
   const { t } = useLang();
   const { address, email, wallet } = usePatient();
   const { busy, error, signed, setBusy, setError } = useSigned(caseView.id, onCase);
@@ -200,7 +364,17 @@ function CaseBody({ caseView, onCase }: { caseView: CaseView; onCase: (c: CaseVi
             </div>
           ) : null}
           <ErrorText error={error} />
-          <StageTrack caseView={caseView} renderActions={(m) => <StageActions caseView={caseView} m={m} onCase={onCase} />} />
+          <StageTrack
+            caseView={caseView}
+            renderActions={(m) => (
+              <StageActions
+                caseView={caseView}
+                m={m}
+                onCase={onCase}
+                checkin={checkin && checkin.stage === m.idx ? checkin.nonce : null}
+              />
+            )}
+          />
           {caseView.status === "funded" && <p className="text-xs text-ink-3">{t("case.yield")}</p>}
           {caseView.status === "closed" && <Notice tone="green">{t("case.closedNote")}</Notice>}
         </Card>
@@ -223,7 +397,7 @@ function CaseBody({ caseView, onCase }: { caseView: CaseView; onCase: (c: CaseVi
   );
 }
 
-export function PatientCase({ id }: { id: string }) {
+export function PatientCase({ id, checkin = null }: { id: string; checkin?: { stage: number; nonce: string } | null }) {
   const { t } = useLang();
   const { ready, authenticated, address, login } = usePatient();
   const { caseView, error, setCaseView } = useCase(id);
@@ -253,7 +427,7 @@ export function PatientCase({ id }: { id: string }) {
             )}
           </Card>
         ) : (
-          <CaseBody caseView={caseView} onCase={setCaseView} />
+          <CaseBody caseView={caseView} onCase={setCaseView} checkin={checkin} />
         )}
       </main>
       <SiteFooter />

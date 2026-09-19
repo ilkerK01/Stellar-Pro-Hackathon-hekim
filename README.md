@@ -87,6 +87,46 @@ hekim solves one problem: **trust in the payment between a foreign patient and a
 | **No-show** | If the patient locks the money and never arrives, the clinic files a no-show claim on the first stage. Suggested decision: half for the clinic's costs, the rest of the plan refunded. |
 | **Nobody moves money alone** | Every release needs the patient's signature or an arbiter decision. Not the clinic, not the patient, not hekim. |
 
+### Dual signatures: no signature, no service
+
+Every stage of a new plan is opened and closed by **two cryptographic signatures from each side**, and every one of them is verified by our Soroban contract before it is stored.
+
+| Moment | Clinic signs | Patient signs | What it proves |
+|---|---|---|---|
+| **Start** | the scope it commits to, e.g. "hair transplant, 4,000 grafts" | "I am here, the stage starts, I have seen the scope" | The clinic cannot deny its promise; the patient cannot deny they came |
+| **End** | what was actually done (replaces the plain evidence note) | "the procedure was performed and I was discharged" | Evidence only. It is **not** an approval: money still moves only on the patient's approval or an arbiter decision, and the screen says "your right to dispute remains" |
+
+- **Physical presence.** When the clinic signs the start, its screen shows a one-time QR code (valid 10 minutes). The patient scans it with their phone and signs; the arrival is marked **in person**. Without the code it is recorded as **self-declared**.
+- **What is signed.** A [SEP-53](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0053.md) message: `sha256("Stellar Signed Message:\n" + {case, stage, role, entry or exit, sha256 of the statement, time, one-time nonce})`. The patient signs that hash with Privy (`signRawHash`), the browser recomputes the hash from the message it shows before signing, and the server verifies the signature against the plan's patient wallet. A signature cannot be replayed on another case, stage or role.
+- **On chain.** The registry contract's `attest` function runs `ed25519_verify` on every signature and stores signer, digest and ledger time once. The statement itself never goes on chain, only its hash. The platform submits the transaction, so the patient pays no fee and needs no reserve.
+- **Missing signatures have deadlines** (`SIGNATURE_WINDOW_MINUTES`, 72 hours, 2 minutes in the demo):
+
+| Missing | Who can ask the arbiter | Claim | Suggested decision |
+|---|---|---|---|
+| Clinic signed the start, patient never arrived | Clinic | `no_show`, now on any stage | 50% |
+| Patient arrived and signed, clinic never started | Patient | `not_started` (new) | 100% to the patient |
+| Both signed the start, clinic never signed the end | Patient | `not_finished` (new) | 100% to the patient |
+| Clinic signed the end, patient never approved | Clinic | `no_response` (unchanged) | 0% |
+
+Plans created before this feature keep working without signatures.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screens/signature-checkin.webp" alt="Clinic check-in QR" /></td>
+<td width="50%"><img src="docs/screens/signature-timeline.webp" alt="Four signatures verified on chain" /></td>
+</tr>
+<tr>
+<td>The clinic signs the scope and shows a one-time check-in code.</td>
+<td>Four signatures for one stage, each verified on chain; the patient's arrival is marked in person.</td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screens/arbiter-signatures.webp" alt="Arbiter with the signature timeline" /></td>
+</tr>
+<tr>
+<td colspan="2">The arbiter sees the signature timeline. Here the patient signed their arrival and the clinic never started, so the suggested decision is a full refund.</td>
+</tr>
+</table>
+
 ## How it works
 
 ```mermaid
@@ -199,6 +239,19 @@ Everything below ran on Stellar testnet on 19 September 2026 during the hackatho
 
 > These runs were driven by `npm run e2e`, so the **patient** role is signed by the script's local key instead of a Privy wallet. It goes through exactly the same endpoints and intent checks; in the browser the only difference is that Privy produces the signature. The same flows also run on every push in the [Testnet E2E workflow](../../actions/workflows/e2e.yml), which deploys the contract from that commit and lists every transaction in the run summary.
 
+### Case HK-88BC65: dual signatures on every stage
+
+Ten signatures (start and end for three stages, plus the patient's end signature on stage 1), each verified by the registry contract's `attest`.
+
+| Stage 1 signature | Transaction |
+|---|---|
+| Clinic signs the scope | [`0ccfc4c9…`](https://stellar.expert/explorer/testnet/tx/0ccfc4c946784364ad846a7b90fc9d2e167e967b181aaee59255aa32d8bb9cb4) |
+| Patient signs arrival, in person with the check-in code | [`d500cb7e…`](https://stellar.expert/explorer/testnet/tx/d500cb7e81287e30e397abd7251254fcefa56e2d0d157a8dc0946526d50f8de7) |
+| Clinic signs what was done | [`236347fd…`](https://stellar.expert/explorer/testnet/tx/236347fd16b222e602924b747214cc1ad004a1ed86b77a975d7cfc549b174ecb) |
+| Patient confirms it was performed | [`cf9e610e…`](https://stellar.expert/explorer/testnet/tx/cf9e610e7745ec6a07db095b419da797a09bb29a4d4cf876c83e7b13458913c2) |
+
+The same run proved the guards: completing without signatures, completing before the patient arrived, a signature from another key and a replayed signature request were all rejected. The missing-signature claims ran in cases HK-9445AE (no-show on stage 2), HK-B043CF (clinic never started) and HK-2F2321 (clinic never finished).
+
 ### Case HK-D37723: happy path with one dispute
 
 Escrow contract [`CADP7K…UN5C4`](https://stellar.expert/explorer/testnet/contract/CADP7KTTAWWEND7QXNOYGBQ3ZWORXRFWOPQ2LYZF4GYQ2NUU4ATUN5C4)
@@ -263,7 +316,7 @@ It is load-bearing, not decorative:
 
 1. **Issuing a plan** reads `clinic()` from the contract; an unregistered clinic cannot issue plans.
 2. **Accepting a plan** reads the record again right before the escrow is deployed; the trust score and case count at that moment are stored on the case and logged.
-3. **Completing a stage** anchors the evidence hash with `anchor_evidence`.
+3. **Starting and ending a stage** stores four signatures with `attest`, each verified on chain, and completing it anchors the evidence hash with `anchor_evidence`.
 4. **Closing a case** writes the outcome with `record_case`, which changes the score the next patient sees.
 
 | Function | Auth | Purpose |
@@ -272,10 +325,12 @@ It is load-bearing, not decorative:
 | `register_clinic(clinic, name, country)` | admin | Opens a clinic record |
 | `anchor_evidence(case_id, stage, hash)` | admin | Stores the SHA-256 of a stage's evidence note once. The note itself never goes on chain |
 | `record_case(case_id, clinic, amount, released, refunded, disputes, evidence_root)` | admin | Writes a closed case once, updates the clinic's counters, returns `Completed`, `Arbitrated` or `Refunded` |
+| `attest(case_id, stage, phase, role, signer, digest, signature)` | admin | Verifies an ed25519 signature over the SEP-53 digest with `ed25519_verify` and stores it once with the ledger time |
+| `attestation(case_id, stage, phase, role)` | none | Public read of a stored signature |
 | `clinic`, `case`, `evidence` | none | Public reads |
 | `trust_score(clinic)` | none | Share of closed cases without any dispute, in basis points |
 
-Persistent storage with TTL extension on every write, checked arithmetic, typed errors, `#[contractevent]` events (`ClinicRegistered`, `EvidenceAnchored`, `CaseRecorded`) and 7 unit tests, including the auth tree and the event topics. Full reference: [contracts/registry/README.md](contracts/registry/README.md).
+Persistent storage with TTL extension on every write, checked arithmetic, typed errors, `#[contractevent]` events (`ClinicRegistered`, `EvidenceAnchored`, `CaseRecorded`) and 9 unit tests, including the auth tree, the event topics, a verified signature and a forged one. Full reference: [contracts/registry/README.md](contracts/registry/README.md).
 
 ## Hackathon requirements
 
@@ -343,7 +398,7 @@ cd contracts && cargo test && cd ..
 npm run e2e
 ```
 
-`npm run e2e` drives the whole product against Stellar testnet through the app's own API, with a local key playing the patient instead of Privy: wallet activation and USDC trustline, SEP-10 login, a 400 TRY SEP-6 top-up, a plan with escrow deployment and funding, stage reports with evidence hashes, approvals and releases, a patient dispute and an arbiter split, case closing and the registry record. Other scenarios: `npm run e2e -- noshow`, `npm run e2e -- noresponse` (waits for the 2-minute window), `npm run e2e -- payout` (clinic cash-out to TRY). It needs the dev server running.
+`npm run e2e` drives the whole product against Stellar testnet through the app's own API, with a local key playing the patient instead of Privy: wallet activation and USDC trustline, SEP-10 login, a SEP-6 top-up, a plan with escrow deployment and funding, dual signatures on every stage, approvals and releases, a patient dispute and an arbiter split, case closing and the registry record. More scenarios: `signed` (dual signatures and the four guards), `gaps` (no-show on stage 2, clinic never started, clinic never finished), `clean`, `noshow`, `noresponse`, `payout`. Pass them as `npm run e2e -- signed,gaps`. It needs the dev server running.
 
 | Page | What you can do |
 |---|---|
