@@ -1,0 +1,22 @@
+name: Contract release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+jobs:
+  registry:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      release_description: "hekim registry contract, built and attested by GitHub Actions"
+      relative_path: '["contracts"]'
+      package: "hekim-registry"
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
