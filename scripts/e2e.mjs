@@ -32,9 +32,21 @@ function sign(signable) {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function expect(ok, message) {
+  if (!ok) throw new Error(`Check failed: ${message}`);
+}
+
+function summary(line) {
+  if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `${line}\n`, { flag: "a" });
+}
+
+const code = (value) => "`" + value + "`";
+const tx = (hash) => `[${code(`${hash.slice(0, 10)}…`)}](https://stellar.expert/explorer/testnet/tx/${hash})`;
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 log("patient", address);
+summary("| Step | Result |\n|---|---|");
 
 if (steps.includes("wallet")) {
   const res = await call(`/api/wallet/${address}`, { action: "activate" });
@@ -42,7 +54,10 @@ if (steps.includes("wallet")) {
     const r = await call(`/api/wallet/${address}`, { action: "trustline", signedXdr: sign(res.signable) });
     log("trustline", r.hash);
   }
-  log("wallet", JSON.stringify((await call(`/api/wallet/${address}`)).wallet));
+  const w = (await call(`/api/wallet/${address}`)).wallet;
+  log("wallet", JSON.stringify(w));
+  expect(w.exists && w.usdc !== null, "patient wallet activated with a USDC trustline");
+  summary(`| Wallet activated with USDC trustline | ${address.slice(0, 8)}… |`);
 }
 
 if (steps.includes("topup")) {
@@ -58,6 +73,8 @@ if (steps.includes("topup")) {
     ramp = (await call("/api/anchor", { action: "refresh", address, rampId: dep.ramp.id })).ramp;
     log("ramp", ramp.status, ramp.amountOut ?? "");
   }
+  expect(ramp.status === "completed", "SEP-6 deposit completed");
+  summary(`| SEP-10 login and SEP-6 deposit | ${amountTry} TRY became ${Number(ramp.amountOut).toFixed(4)} USDC |`);
   log("wallet", JSON.stringify((await call(`/api/wallet/${address}`)).wallet));
 }
 
@@ -94,7 +111,11 @@ if (steps.includes("happy")) {
   c = await patientSigned(c.id, { action: "prepare-approve", idx: 2 }, "approve");
   show(c);
   for (const e of c.events.slice().reverse()) log(" ", e.actor, e.kind, e.txHash ?? "");
-  
+  expect(c.status === "closed", "happy path case closed");
+  expect(Number(c.released) > 0 && Number(c.refunded) > 0, "released to clinic and refunded to patient after the split");
+  expect(Boolean(c.registryTx), "outcome recorded in the registry contract");
+  summary(`| Escrow for ${c.id} | [\`${c.contractId.slice(0, 10)}…\`](https://stellar.expert/explorer/testnet/contract/${c.contractId}) |`);
+  for (const e of c.events.slice().reverse()) if (e.txHash) summary(`| ${e.actor}: ${e.kind.replaceAll("_", " ")} | ${tx(e.txHash)} |`);
 }
 
 if (steps.includes("clean")) {
@@ -106,7 +127,8 @@ if (steps.includes("clean")) {
     c = await patientSigned(c.id, { action: "prepare-approve", idx }, "approve");
   }
   show(c);
-  log("registry tx", c.registryTx);
+  expect(c.status === "closed" && Number(c.refunded) === 0 && Boolean(c.registryTx), "clean case closed without refunds and recorded");
+  summary(`| Clean case ${c.id}, no dispute | recorded ${tx(c.registryTx)} |`);
 }
 
 if (steps.includes("noshow")) {
@@ -118,6 +140,8 @@ if (steps.includes("noshow")) {
   c = await stage(c.id, "resolve", 0, { patientPercent: 50, refundRest: true });
   show(c);
   for (const e of c.events.slice().reverse()) log(" ", e.actor, e.kind, e.txHash ?? "");
+  expect(c.status === "closed" && Number(c.refunded) > Number(c.released), "no-show case refunded the rest of the plan");
+  summary(`| No-show ${c.id} | ${c.refunded} USDC back to the patient, ${c.released} USDC to the clinic |`);
 }
 
 if (steps.includes("noresponse")) {
@@ -125,18 +149,22 @@ if (steps.includes("noresponse")) {
   c = (await call(`/api/cases/${c.id}`, { action: "accept", address, email: EMAIL })).case;
   c = await patientSigned(c.id, { action: "prepare-fund" }, "fund");
   c = await stage(c.id, "complete", 0, { evidence: "Examination done." });
+  let early = false;
   try {
     await stage(c.id, "claim", 0, { kind: "no_response", note: "Too early" });
-    log("ERROR early claim accepted");
+    early = true;
   } catch (e) {
     log("early claim rejected:", e.message);
   }
+  expect(!early, "a no-response claim before the window ends is rejected");
   const due = new Date(c.milestones[0].approvalDue).getTime();
   log("waiting until", c.milestones[0].approvalDue);
   await wait(Math.max(0, due - Date.now()) + 3000);
   c = await stage(c.id, "claim", 0, { kind: "no_response", note: "No answer from patient in 72h." });
   c = await stage(c.id, "resolve", 0, { patientPercent: 0, refundRest: true });
   show(c);
+  expect(c.status === "closed", "no-response case closed by the arbiter");
+  summary(`| No response ${c.id} | early claim rejected, claim after the window accepted, case closed |`);
 }
 
 if (steps.includes("payout")) {
@@ -148,9 +176,13 @@ if (steps.includes("payout")) {
     ramp = (await call("/api/clinic", { action: "refresh", rampId: r.id })).ramp;
     log("payout", ramp.status, ramp.amountOut ?? "");
   }
+  expect(ramp.status === "completed", "SEP-6 withdrawal completed");
+  summary(`| Clinic cash-out, SEP-6 withdraw | ${ramp.amountIn} USDC became ${ramp.amountOut} TRY, ${tx(r.paymentHash)} |`);
 }
 
 if (steps.includes("registry")) {
   const cfg = await call("/api/config");
   log("registry", JSON.stringify(cfg.clinic.record));
+  expect(cfg.clinic.record && cfg.clinic.record.cases > 0, "registry reports closed cases for the clinic");
+  summary(`| Registry contract | [\`${cfg.clinic.registryContractId.slice(0, 10)}…\`](https://stellar.expert/explorer/testnet/contract/${cfg.clinic.registryContractId}), ${cfg.clinic.record.cases} closed case(s), trust score ${cfg.clinic.record.trustScore / 100} |`);
 }

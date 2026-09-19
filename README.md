@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ilkerK01/Stellar-Pro-Hackathon-hekim/actions/workflows/ci.yml"><img src="https://github.com/ilkerK01/Stellar-Pro-Hackathon-hekim/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/ilkerK01/Stellar-Pro-Hackathon-hekim/actions/workflows/e2e.yml"><img src="https://github.com/ilkerK01/Stellar-Pro-Hackathon-hekim/actions/workflows/e2e.yml/badge.svg" alt="Testnet E2E" /></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Stellar-testnet-0f172a?logo=stellar&logoColor=white" alt="Stellar testnet" />
   <img src="https://img.shields.io/badge/Soroban-soroban--sdk%2028-7c3aed" alt="Soroban SDK 28" />
   <img src="https://img.shields.io/badge/escrow-Trustless%20Work-12546c" alt="Trustless Work" />
@@ -72,7 +77,7 @@ hekim solves one problem: **trust in the payment between a foreign patient and a
 - **Paid stage by stage.** The clinic posts evidence, the patient approves, that stage is released.
 - **Lira in, lira out.** Patients top up by bank transfer through a SEP-6 anchor (or send USDC they already hold). Clinics cash out to their IBAN in TRY and never touch crypto.
 - **Problems go to an arbiter.** The money stays locked; an independent arbiter refunds, pays or splits, and the contract enforces it.
-- **A track record nobody can fake.** Every closed case and every evidence hash is written to our own Soroban registry contract.
+- **A track record nobody can fake.** Every closed case and every evidence hash is written to our own Soroban registry contract. The contract is also the gate: a plan can only be issued and an escrow only opened for a clinic registered there, and the patient sees the clinic's record, read live from the contract, right above the accept button.
 
 ### Rules that protect both sides
 
@@ -192,6 +197,8 @@ The same pattern signs the USDC trustline (the server accepts only a single `cha
 
 Everything below ran on Stellar testnet on 19 September 2026 during the hackathon. Click any hash to see it on Stellar Expert.
 
+> These runs were driven by `npm run e2e`, so the **patient** role is signed by the script's local key instead of a Privy wallet. It goes through exactly the same endpoints and intent checks; in the browser the only difference is that Privy produces the signature. The same flows also run on every push in the [Testnet E2E workflow](../../actions/workflows/e2e.yml), which deploys the contract from that commit and lists every transaction in the run summary.
+
 ### Case HK-D37723: happy path with one dispute
 
 Escrow contract [`CADP7K…UN5C4`](https://stellar.expert/explorer/testnet/contract/CADP7KTTAWWEND7QXNOYGBQ3ZWORXRFWOPQ2LYZF4GYQ2NUU4ATUN5C4)
@@ -252,6 +259,13 @@ A claim before the 2-minute window ended was rejected by the server. After the w
 
 `contracts/registry` is our own Soroban contract (Rust, `soroban-sdk` 28). The escrow proves one case was fair. The registry answers what a new patient actually needs to know: **how has this clinic behaved with previous patients?**
 
+It is load-bearing, not decorative:
+
+1. **Issuing a plan** reads `clinic()` from the contract; an unregistered clinic cannot issue plans.
+2. **Accepting a plan** reads the record again right before the escrow is deployed; the trust score and case count at that moment are stored on the case and logged.
+3. **Completing a stage** anchors the evidence hash with `anchor_evidence`.
+4. **Closing a case** writes the outcome with `record_case`, which changes the score the next patient sees.
+
 | Function | Auth | Purpose |
 |---|---|---|
 | `__constructor(admin)` | deployer | Stores the platform as admin |
@@ -270,7 +284,7 @@ Persistent storage with TTL extension on every write, checked arithmetic, typed 
 | **Integration partner** | **Privy** (eligible wallet partner): email login and a Stellar embedded wallet. The patient signs the trustline, the SEP-10 challenge and every fund, approve and dispute transaction with it. **Trustless Work**: multi-release escrow on Soroban. |
 | **Anchor / local payments** | TRY anchor (`tr-mock-anchor.fly.dev`): SEP-1 discovery, SEP-10 auth, SEP-6 deposit for patients and SEP-6 withdraw for clinics. Real TRY in, real TRY out, simulated only on the bank side of the sandbox. |
 | **Core feature** | The escrow and the anchor are the product: lock, release by stage, dispute, cash out. |
-| **Own contract** | `contracts/registry`, deployed and used by every closed case. |
+| **Own contract** | `contracts/registry`: plans can only be issued and escrows only opened for a clinic registered in it, and every closed case is written to it. |
 
 ## Security and privacy
 
@@ -366,7 +380,10 @@ src/lib/server/
   db.ts                    node:sqlite store
 src/app/api/               Route handlers
 src/components/            Landing, patient, clinic and arbiter UI
-docs/technical.md          Components, design decisions and trade-offs
+docs/technical.md          Architecture, components, decisions, problems we hit, tests, failure modes
+docs/SKILLS_USED.md        Stellar skill files used and what each one changed
+deployments.json           Contract addresses, WASM hash, release and deploy transaction
+.github/workflows/         CI, testnet E2E, contract release with build attestation
 ```
 
 ## Design decisions

@@ -54,6 +54,7 @@ export type CaseView = {
   acceptedAt: string | null;
   fundedAt: string | null;
   registryTx: string | null;
+  registryCheck: { score: number; cases: number } | null;
   milestones: Milestone[];
   events: CaseEvent[];
   ramps: Ramp[];

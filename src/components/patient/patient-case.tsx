@@ -156,7 +156,11 @@ function CaseBody({ caseView, onCase }: { caseView: CaseView; onCase: (c: CaseVi
           {mismatch || otherWallet ? (
             <Notice tone="coral">{t("patient.noPlans")}</Notice>
           ) : caseView.status === "open" ? (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <div className="rounded-2xl border border-teal/20 bg-teal-soft/40 p-4">
+                <p className="mb-3 text-sm text-teal-2">{t("case.registryGate")}</p>
+                <RegistryPanel profile={profile} />
+              </div>
               <p className="text-sm text-ink-2">{t("case.acceptHint")}</p>
               <Button
                 busy={busy === "accept"}

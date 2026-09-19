@@ -44,6 +44,8 @@ type CaseRow = {
   accepted_at: string | null;
   funded_at: string | null;
   registry_tx: string | null;
+  registry_score: number | null;
+  registry_cases: number | null;
 };
 
 type MilestoneRow = {
@@ -226,6 +228,10 @@ export function getCase(id: string): CaseView {
     acceptedAt: row.accepted_at,
     fundedAt: row.funded_at,
     registryTx: row.registry_tx,
+    registryCheck:
+      row.registry_score === null || row.registry_cases === null
+        ? null
+        : { score: row.registry_score, cases: row.registry_cases },
     milestones: ms.map(toMilestone),
     events: events.map(
       (e): CaseEvent => ({
@@ -285,7 +291,19 @@ function text(value: unknown, field: string, max = 200): string {
   return trimmed;
 }
 
-export function createCase(input: NewCase): CaseView {
+async function requireRegisteredClinic(): Promise<registry.ClinicRecord> {
+  if (!registry.registryEnabled()) {
+    throw new HekimError("The clinic registry contract is not configured", 503);
+  }
+  const record = await registry.clinicRecord(keys.clinic().publicKey());
+  if (!record) {
+    throw new HekimError("This clinic is not registered in the hekim registry contract", 403);
+  }
+  return record;
+}
+
+export async function createCase(input: NewCase): Promise<CaseView> {
+  await requireRegisteredClinic();
   const title = text(input.title, "Title", 120);
   const treatment = text(input.treatment, "Treatment", 120);
   const patientName = text(input.patientName, "Patient name", 120);
@@ -371,6 +389,14 @@ export async function acceptCase(caseId: string, address: string, email: string)
     assertPatient(row, address);
     return getCase(caseId);
   }
+  const record = await requireRegisteredClinic();
+  setCase(caseId, { registry_score: record.trustScore, registry_cases: record.cases });
+  logEvent(
+    caseId,
+    "platform",
+    "registry_checked",
+    `${record.name}: trust score ${(record.trustScore / 100).toFixed(0)} over ${record.cases} closed cases`,
+  );
   const platform = keys.platform();
   const clinic = keys.clinic();
   const arbiter = keys.arbiter();
@@ -797,7 +823,7 @@ export async function clinicWithdraw(amountUsdc: string, caseId: string | null):
   return refreshRamp(instructions.id).catch(() => toRamp(rampRow(instructions.id)));
 }
 
-export function createDemoCase(email: string, name: string): CaseView {
+export async function createDemoCase(email: string, name: string): Promise<CaseView> {
   return createCase({
     title: "Dental implant package",
     treatment: "Two implants with zirconia crowns",

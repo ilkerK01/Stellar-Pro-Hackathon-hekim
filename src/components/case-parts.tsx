@@ -165,6 +165,14 @@ export function CaseHeader({ caseView }: { caseView: CaseView }) {
             {t("common.escrow")}: <ContractLink id={caseView.contractId} />
           </p>
         )}
+        {caseView.registryCheck && (
+          <p className="mt-1 text-xs text-teal">
+            {t("case.registryAtAccept", {
+              score: (caseView.registryCheck.score / 100).toFixed(0),
+              cases: caseView.registryCheck.cases,
+            })}
+          </p>
+        )}
       </div>
       <CaseStatusBadge status={caseView.status} />
     </div>

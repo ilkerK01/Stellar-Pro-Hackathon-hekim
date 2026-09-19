@@ -80,6 +80,9 @@ function open(): DatabaseSync {
   const db = new DatabaseSync(env.dbPath);
   db.exec("pragma journal_mode = wal;");
   db.exec(schema);
+  const columns = (db.prepare("pragma table_info(cases)").all() as { name: string }[]).map((c) => c.name);
+  if (!columns.includes("registry_score")) db.exec("alter table cases add column registry_score integer");
+  if (!columns.includes("registry_cases")) db.exec("alter table cases add column registry_cases integer");
   return db;
 }
 

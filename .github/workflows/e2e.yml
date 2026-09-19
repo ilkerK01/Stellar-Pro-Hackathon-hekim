@@ -1,0 +1,97 @@
+name: Testnet E2E
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: testnet-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TW_API_KEY: ${{ secrets.TW_API_KEY }}
+    steps:
+      - name: Check secrets
+        id: gate
+        run: |
+          if [ -z "$TW_API_KEY" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "TW_API_KEY repository secret is not set, skipping the testnet run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          targets: wasm32v1-none
+
+      - name: Install Stellar CLI
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin stellar
+          stellar --version
+
+      - name: Install dependencies
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Create and fund fresh testnet accounts
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          cp .env.example .env.local
+          npm run setup
+
+      - name: Build, test and deploy the registry contract
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          cd contracts
+          cargo test
+          stellar contract build
+          cd ..
+          SECRET=$(grep '^PLATFORM_SECRET=' .env.local | cut -d= -f2)
+          ADMIN=$(node -e "console.log(require('@stellar/stellar-sdk').Keypair.fromSecret(process.argv[1]).publicKey())" "$SECRET")
+          ID=$(stellar contract deploy --wasm contracts/target/wasm32v1-none/release/hekim_registry.wasm --source-account "$SECRET" --network testnet -- --admin "$ADMIN" | tail -1)
+          sed -i "s/^REGISTRY_CONTRACT_ID=.*/REGISTRY_CONTRACT_ID=$ID/" .env.local
+          sed -i "s/^TW_API_KEY=.*/TW_API_KEY=$TW_API_KEY/" .env.local
+          npm run setup
+          echo "### hekim testnet run" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Registry contract deployed from this commit: [\`$ID\`](https://stellar.expert/explorer/testnet/contract/$ID)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and start the app
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          npm run build
+          nohup npm start > app.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/api/config > /dev/null && exit 0
+            sleep 2
+          done
+          cat app.log
+          exit 1
+
+      - name: Run every flow on testnet
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TRY: "1500"
+        run: npm run e2e -- wallet,topup,happy,clean,noshow,noresponse,payout,registry
+
+      - name: App log
+        if: failure() && steps.gate.outputs.enabled == 'true'
+        run: cat app.log

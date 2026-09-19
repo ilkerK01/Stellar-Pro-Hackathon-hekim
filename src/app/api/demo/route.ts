@@ -4,6 +4,6 @@ import { body, handle, str } from "@/lib/server/http";
 export async function POST(req: Request) {
   return handle(async () => {
     const b = await body(req);
-    return { case: createDemoCase(str(b.email, "Email"), String(b.name ?? "")) };
+    return { case: await createDemoCase(str(b.email, "Email"), String(b.name ?? "")) };
   });
 }

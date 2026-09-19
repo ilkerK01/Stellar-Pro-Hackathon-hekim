@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   return handle(async () => {
     const b = await body(req);
     return {
-      case: createCase({
+      case: await createCase({
         title: String(b.title ?? ""),
         treatment: String(b.treatment ?? ""),
         patientName: String(b.patientName ?? ""),
